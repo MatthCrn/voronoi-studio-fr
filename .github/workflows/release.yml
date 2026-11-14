@@ -1,1 +1,79 @@
+name: Fabriquer et publier Windows
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publication-windows
+  cancel-in-progress: false
+jobs:
+  publier:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Préparer le logiciel
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path C:\vfr -Force | Out-Null
+          Expand-Archive -LiteralPath logiciel.zip -DestinationPath C:\vfr
+      - name: Installer les outils et dépendances
+        working-directory: C:\vfr
+        shell: pwsh
+        run: |
+          npm install --global pnpm@11.25.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Vérifier et fabriquer les versions Windows
+        working-directory: C:\vfr
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm run desktop:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Préparer les fichiers de distribution
+        working-directory: C:\vfr
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath LICENSE,NOTICE.md -Destination release
+          Copy-Item -LiteralPath "$env:GITHUB_WORKSPACE\README.md","$env:GITHUB_WORKSPACE\Guide-composition-1.11.md","$env:GITHUB_WORKSPACE\RELEASE-NOTES.md" -Destination release
+          $files = Get-ChildItem release -File | Where-Object { $_.Name -match '(^Voronoi-Studio-FR-.*\.exe(\.blockmap)?$)|(^latest\.yml$)|(^LICENSE$)|(^NOTICE\.md$)|(^README\.md$)|(^Guide-composition-.*\.md$)|(^RELEASE-NOTES\.md$)' }
+          $sums = $files | Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name }
+          $sums | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding utf8
+      - name: Publier la version complète
+        working-directory: C:\vfr
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version invalide.' }
+          $tag = 'v' + $version
+          $expected = @("Voronoi-Studio-FR-$version-x64-installation.exe", "Voronoi-Studio-FR-$version-x64-installation.exe.blockmap", "Voronoi-Studio-FR-$version-x64-portable.exe", 'latest.yml', 'SHA256SUMS.txt', 'LICENSE', 'NOTICE.md', 'README.md', 'Guide-composition-1.11.md', 'RELEASE-NOTES.md')
+          foreach ($name in $expected) {
+            $path = Join-Path release $name
+            if (!(Test-Path -LiteralPath $path) -or (Get-Item -LiteralPath $path).Length -eq 0) { throw "Fichier manquant ou vide : $name" }
+          }
+          gh release view $tag --repo $env:GH_REPO
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GH_REPO --draft --title "Voronoi Studio — Français $version" --notes-file release/RELEASE-NOTES.md
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $assets = Get-ChildItem release -File | Where-Object { $_.Name -match '(^Voronoi-Studio-FR-.*\.exe(\.blockmap)?$)|(^latest\.yml$)|(^LICENSE$)|(^NOTICE\.md$)|(^README\.md$)|(^Guide-composition-.*\.md$)|(^RELEASE-NOTES\.md$)|(^SHA256SUMS\.txt$)' } | ForEach-Object { $_.FullName }
+          gh release upload $tag @assets --repo $env:GH_REPO --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $tag --repo $env:GH_REPO --draft=false --latest --notes-file release/RELEASE-NOTES.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
